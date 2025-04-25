@@ -237,7 +237,7 @@ class Aggregator:
                 to_proto_tensor_dict, committed_round_number, self.compression_pipeline
             )
             # round number is the current round which is still in process
-            #  i.e. committed_round_number + 1
+            #  i.e. committed_round_number
             self.round_number = committed_round_number + 1
             logger.info(
                 "Recovery - loaded round number %s and best score %s",
@@ -364,8 +364,10 @@ class Aggregator:
                     round_number,
                 )
                 return
+
         if file_path == self.best_state_path:
             self.best_tensor_dict = tensor_dict
+
         if file_path == self.last_state_path:
             # Transaction to persist/delete all data needed to increment the round
             if self.persistent_db:
@@ -381,6 +383,7 @@ class Aggregator:
                     round_number,
                 )
             self.last_tensor_dict = tensor_dict
+
         self.model = utils.construct_model_proto(
             tensor_dict, round_number, self.compression_pipeline
         )
@@ -1104,11 +1107,18 @@ class Aggregator:
                 if "validate_agg" in tags:
                     # Compare the accuracy of the model, potentially save it.
                     if self.best_model_score is None or self.best_model_score < agg_results:
-                        logger.info(
-                            f"Round {round_number}: saved the best model with score {agg_results:f}"
-                        )
                         self.best_model_score = agg_results
-                        self._save_model(round_number, self.best_state_path)
+                        if not self.assigner.is_task_group_evaluation():
+                            logger.info(
+                                f"Round {round_number}: saved the best model with score "
+                                "{agg_results:f}"
+                            )
+                            self._save_model(round_number, self.best_state_path)
+                        else:
+                            logger.info(
+                                f"Round {round_number}: best score observed {agg_results:f} "
+                                "(model not saved in evaluation mode)"
+                            )
             if "trained" in tags:
                 self._prepare_trained(tensor_name, origin, round_number, report, agg_results)
 
@@ -1135,17 +1145,22 @@ class Aggregator:
         for task_name in self.assigner.get_all_tasks_for_round(self.round_number):
             logs.update(self._compute_validation_related_task_metrics(task_name))
 
-        # End of round callbacks.
-        self.callbacks.on_round_end(self.round_number, logs)
-
         # Once all of the task results have been processed
         self._end_of_round_check_done[self.round_number] = True
 
+        # End of round callbacks.
+        # todo handle case when aggregator restarted before callback was successful
+        self.callbacks.on_round_end(self.round_number, logs)
+
         # Save the latest model
-        logger.info("Saving round %s model...", self.round_number)
-        self._save_model(self.round_number, self.last_state_path)
+        if not self.assigner.is_task_group_evaluation():
+            logger.info("Saving round %s model...", self.round_number)
+            self._save_model(self.round_number, self.last_state_path)
+        else:
+            logger.info("Skipping model save for round %s in evaluation mode.", self.round_number)
 
         self.round_number += 1
+
         # resetting stragglers for task for a new round
         self.stragglers = []
         # resetting collaborators_done for next round
